@@ -87,20 +87,20 @@ bool isValidSyscall(int syscall_id) {
 
     insyscall = !insyscall;
     if(insyscall) {
-        std::clog << "Enter system call: " << syscall_list[syscall_id] << "\n";
+        // std::clog << "Enter system call: " << syscall_list[syscall_id] << "\n";
         if(white_list[syscall_id] == INF) {
-            std::clog << syscall_list[syscall_id] << " can be called INF times.\n";
+            // std::clog << syscall_list[syscall_id] << " can be called INF times.\n";
             return true;
         } else if(white_list[syscall_id] > 0) {
             white_list[syscall_id]--;
-            std::clog << syscall_list[syscall_id] << " can be called "<< white_list[syscall_id] <<" times.\n";
+            // std::clog << syscall_list[syscall_id] << " can be called "<< white_list[syscall_id] <<" times.\n";
             return true;
         } else {
-            std::clog << syscall_list[syscall_id] << " can't be called any more!\n";
+            // std::clog << syscall_list[syscall_id] << " can't be called any more!\n";
             return false;
         }
     } else {
-        std::clog << "Leave system call: " << syscall_list[syscall_id] << "\n";
+        // std::clog << "Leave system call: " << syscall_list[syscall_id] << "\n";
         return true;
     }
 }

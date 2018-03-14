@@ -21,11 +21,13 @@
 #include <sys/ptrace.h>
 #include <dirent.h>
 #include <pwd.h>
+#include <sys/stat.h>
 #include "Time.h"
 #include "whiteList.h"
 
 using namespace std;
 const char *datadir = "./data/";
+const char *tempdir = "temp";
 
 enum Result {
     Result_Running,             // := 0
@@ -41,7 +43,7 @@ enum Result {
     Result_DangerouCode         // := 10
 };
 
-char *result_str[] = {
+const char *result_str[] = {
         "Running",
         "Accepted",
         "Wrong Answer",
@@ -91,10 +93,10 @@ void parseParameter(int argc, char *argv[]) {
                 opt.data_dir = optarg;
                 break;
             case 't':
-                sscanf(optarg, "%d", &opt.time_limit);
+                sscanf(optarg, "%lu", &opt.time_limit);
                 break;
             case 'm':
-                sscanf(optarg, "%d", &opt.memory_limit);
+                sscanf(optarg, "%lu", &opt.memory_limit);
                 break;
             case '?':
                 cerr << "Invalid options.";
@@ -106,7 +108,7 @@ void parseParameter(int argc, char *argv[]) {
 }
 
 void outputResult() {
-    clog << "################ RESULT ################\n";
+    clog << "#################### RESULT ####################\n";
     clog << result_str[result] << "\n";
 }
 
@@ -146,6 +148,27 @@ void setLimit()
     }
 }
 
+void alarm(int which, int milliseconds) {
+    struct itimerval it;
+
+    it.it_value.tv_sec = milliseconds / 1000;
+    it.it_value.tv_usec = (milliseconds % 1000) * 1000;
+    it.it_interval.tv_sec = 0;
+    it.it_interval.tv_usec = 0;
+
+    setitimer(which, &it, NULL);
+}
+
+void timeoutHandler(int signo) {
+    switch (signo) {
+        case SIGPROF:
+            cerr << "Timeout!\n";
+            exit(-1);
+        default:
+            break;
+    }
+}
+
 unsigned long getMemory(pid_t pid) {
     char buffer[256];
     sprintf(buffer, "/proc/%d/status", pid);
@@ -182,6 +205,8 @@ bool isInputFile(const char *filename) {
 void compareUntilNonspace(FILE *&fd_std, int &ch_std, FILE *&fd_usr, int &ch_usr, Result &ret) {
     while(isspace(ch_std) || isspace(ch_usr)) {
         if(ch_std != ch_usr) {
+            // Deal with the files from Windows.
+            // The end-of-line is CRLF(\r\n) in Windows, LF(\n) in *nix and CR("\r") in Mac.
             if(ch_std == '\r' && ch_usr == '\n') {
                 ch_std = fgetc(fd_std);
                 if(ch_std != ch_usr) {
@@ -203,12 +228,11 @@ Result compareOutput(const char *std_file, const char *usr_file) {
     FILE *fd_usr = fopen(usr_file, "r");
 
     if(!fd_std) {
-        cerr << "Can not open standard file!\n";
-        cerr << std_file << '\n';
+        cerr << "Can not open standard file!\n" << std_file << ": No such file.\n";
         return Result_RuntimeError;
     }
     if(!fd_usr) {
-        cerr << "Can not open user's file!\n";
+        cerr << "Can not open user's file!\n" << usr_file << ": No such file.\n";
         return Result_RuntimeError;
     }
 
@@ -231,13 +255,42 @@ Result compareOutput(const char *std_file, const char *usr_file) {
             ch_std = fgetc(fd_std);
             ch_usr = fgetc(fd_usr);
         }
-
     }
 
     if(fd_std) fclose(fd_std);
     if(fd_usr) fclose(fd_usr);
 
     return ret;
+}
+
+int removeTempDir() {
+    DIR *dir;
+    dirent *ptr;
+    if(chdir(tempdir)) {
+        cerr << "Change directory failed.\n";
+        return -1;
+    }
+    if((dir = opendir(".")) == NULL) {
+        cerr << "Open directory failed.\n" << tempdir << ": No such directory.\n";
+        return -1;
+    }
+    while((ptr = readdir(dir)) != NULL) {
+        if(strcmp(".", ptr->d_name) == 0 || strcmp("..", ptr->d_name) == 0) continue;
+        if(remove(ptr->d_name)) {
+            cerr << "Remove file failed.\n" << ptr->d_name << "\n";
+            break;
+        }
+    }
+    closedir(dir);
+    if(chdir("..")) {
+        cerr << "Change directory failed.\n";
+        return -1;
+    }
+    if(rmdir(tempdir)) {
+        cerr << "Remove directory failed.\n";
+        return -1;
+    }
+    return 0;
 }
 
 int run(const char *dirpath) {
@@ -247,19 +300,26 @@ int run(const char *dirpath) {
     DIR *dir;
     dirent *ptr;
     if((dir = opendir(dirpath)) == NULL) {
-        cerr << "Open dir error!\n";
+        cerr << "Open directory failed.\n" << dirpath << ": No such directory.\n";
         exit(1);
     }
+
     passwd* judge_user = getpwnam(opt.judge_user_name);
     if(judge_user == NULL) {
         cerr << "No such user: " << opt.judge_user_name << "\n";
         exit(1);
     }
+
+    if(mkdir(tempdir, 0777)) {
+        cerr << "Create directory failed.\n";
+        exit(1);
+    }
+
     char tmpName[1024];
     unsigned long memUsed = 0;
     Time timeUsed, timeLimit((timeval){opt.time_limit/1000, (opt.time_limit%1000) * 1000});
 
-    // 遍历指定目录下的所有 *.in 文件
+    // Traverse all input files in dirpath.
     while((result == Result_Running || result == Result_PresentationError) && (ptr = readdir(dir)) != NULL) {
 
         if(strcmp(".", ptr->d_name) == 0 || strcmp("..", ptr->d_name) == 0) continue;
@@ -287,7 +347,6 @@ int run(const char *dirpath) {
             freopen(usr_output_file, "w", stdout);
 
             // Set euid.
-
             if(seteuid(judge_user->pw_uid) != EXIT_SUCCESS) {
                 cerr << "Set euid failed.\n";
             }
@@ -300,6 +359,9 @@ int run(const char *dirpath) {
 
             // Set the resources limits.
             setLimit();
+
+            // signal(SIGPROF, timeoutHandler);
+            // alarm(ITIMER_REAL, 1000);
 
             // Execute the user's program.
             execvp("./Main", NULL);
@@ -315,9 +377,13 @@ int run(const char *dirpath) {
             rusage rused;
             while (true) {
                 wait4(pid, &status, 0, &rused);
+
+                // Get the system call ID.
+
                 int syscall_id = ptrace(PTRACE_PEEKUSER, pid, 4 * ORIG_EAX, NULL);
                 syscall_cnt[syscall_id]++;
 
+                // Check if the child process is terminated normally.
                 if(WIFEXITED(status)) {
                     outputSyscall();
                     clog << "Userexe was normally terminated.\n";
@@ -326,7 +392,7 @@ int run(const char *dirpath) {
                     break;
                 }
 
-
+                // Check if the child process is TLE, RE or OLE.
                 if(WIFSIGNALED(status) ||
                    (WIFSTOPPED(status) && WSTOPSIG(status) != SIGTRAP))
                 {
@@ -335,10 +401,12 @@ int run(const char *dirpath) {
                         signo = WTERMSIG(status);
                     else
                         signo = WSTOPSIG(status);
+
                     switch(signo){
                         //TLE
                         case SIGXCPU:
                         case SIGKILL:
+                        case SIGPROF:
                             result = Result_TimeLimitExceed;
                             break;
 
@@ -355,21 +423,20 @@ int run(const char *dirpath) {
                     }
                     ptrace(PTRACE_KILL, pid);
                     outputSyscall();
-                    cerr << "Userexe was killed!\n";
+                    clog << "Userexe was killed! The terminated signal is: " << signo << "\n";
                     if(result == Result_TimeLimitExceed) timeUsed = timeLimit;
                     break;
                 }
 
-                // 系统调用是否合法
-
+                // Check if the system call is valid.
                 if(!isValidSyscall(syscall_id)) {
-                    cerr << "The child process trys to call a limited system call: " << syscall_list[syscall_id] << "\n";
+                    clog << "The child process trys to call a limited system call: " << syscall_list[syscall_id] << "\n";
                     ptrace(PTRACE_KILL, pid);
                     result = Result_DangerouCode;
                     break;
                 }
 
-
+                // Check if the child process is MLE.
                 memUsed = max(memUsed, getMemory(pid));
                 if(memUsed > opt.memory_limit) {
                     ptrace(PTRACE_KILL, pid);
@@ -377,8 +444,12 @@ int run(const char *dirpath) {
                     result = Result_MemoryLimitExceed;
                     break;
                 }
+
+                // Continue the child process until next time it calls a system call.
                 ptrace(PTRACE_SYSCALL, pid, NULL, NULL);
             }
+
+            //
             if(result == Result_Running || result == Result_PresentationError)
                 timeUsed = timeUsed + Time(rused.ru_stime) + Time(rused.ru_utime);
             if(timeLimit < timeUsed) {
@@ -391,6 +462,9 @@ int run(const char *dirpath) {
 
     if(pid > 0) {
         if(result == Result_Running) result = Result_Accepted;
+        if(removeTempDir()) {
+            exit(-1);
+        }
         outputResult();
         clog << "Used Time: " << timeUsed << "    Used Memory: " << memUsed << "KB\n";
     }
