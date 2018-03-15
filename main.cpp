@@ -379,7 +379,6 @@ int run(const char *dirpath) {
                 wait4(pid, &status, 0, &rused);
 
                 // Get the system call ID.
-
                 int syscall_id = ptrace(PTRACE_PEEKUSER, pid, 4 * ORIG_EAX, NULL);
                 syscall_cnt[syscall_id]++;
 
